@@ -125,12 +125,12 @@ const App: React.FC = () => {
       clearAiTimeout();
       aiTimeoutRef.current = setTimeout(() => {
           setStatus({ type: AppStatusType.IDLE, text: '連線逾時' });
-          alert("⚠️ 連線逾時 (45s)\n後端沒有回應，請檢查網路或稍後再試。");
+          alert("⚠️ 連線逾時 (30s)\n後端沒有回應，請檢查網路或手動點擊「重置狀態」。");
           setResults(prev => prev.map(item => ({
              ...item,
              base: { ...item.base, cn: item.base.cn.includes("AI") ? "連線逾時，請重試" : item.base.cn }
           })));
-      }, 45000); // 45 seconds watchdog
+      }, 30000); // 30 seconds watchdog
   };
 
 
@@ -190,89 +190,100 @@ const App: React.FC = () => {
 
     // Wix Message Listener - Critical for communication
     const handleMessage = (event: MessageEvent) => {
+      // 1. Log incoming event for debugging
+      console.log("[App] Incoming Message Event:", event);
       const data = event.data;
-      
-      // LOGGING FOR DEBUGGING
-      if (data && (data.type === 'BATCH_AI_RESULT' || data.type === 'BATCH_AI_ERROR')) {
-          console.log("[App] Received AI Message:", data);
-      }
 
-      // --- Handle Load Data from Wix ---
-      if (data.type === 'LOAD_DATA' && data.payload) {
-         try {
-             const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
-             if(payload.appSettings) {
-                 setSettings(prev => ({ 
-                     ...prev, 
-                     ...payload.appSettings,
-                     activeFaces: payload.appSettings.activeFaces || prev.activeFaces || DEFAULT_FACES,
-                     activeDecor: payload.appSettings.activeDecor || prev.activeDecor || DEFAULT_DECOR
-                 }));
-             }
-             if(payload.favorites) setFavorites(payload.favorites);
-             if(payload.savedSubCategories) setSavedCategories(payload.savedSubCategories);
-             if(payload.historyLog) setHistoryLog(payload.historyLog);
-             if(payload.userAchieve) setUserAchieve(payload.userAchieve);
-         } catch(e) { console.error("Parse error", e); }
-      }
+      // 2. Wrap in Try-Catch to prevent freezing on processing errors
+      try {
+        if (!data) return;
 
-      // --- Handle AI Results from Wix Backend ---
-      if (data.type === 'BATCH_AI_RESULT') {
-          clearAiTimeout(); // Success! Stop the watchdog.
+        // --- Handle Load Data from Wix ---
+        if (data.type === 'LOAD_DATA' && data.payload) {
+            try {
+                const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
+                if(payload.appSettings) {
+                    setSettings(prev => ({ 
+                        ...prev, 
+                        ...payload.appSettings,
+                        activeFaces: payload.appSettings.activeFaces || prev.activeFaces || DEFAULT_FACES,
+                        activeDecor: payload.appSettings.activeDecor || prev.activeDecor || DEFAULT_DECOR
+                    }));
+                }
+                if(payload.favorites) setFavorites(payload.favorites);
+                if(payload.savedSubCategories) setSavedCategories(payload.savedSubCategories);
+                if(payload.historyLog) setHistoryLog(payload.historyLog);
+                if(payload.userAchieve) setUserAchieve(payload.userAchieve);
+            } catch(e) { console.error("Parse error", e); }
+        }
 
-          let rawResults = data.results;
-          // Robust parsing: sometimes data comes as a string depending on Wix version
-          if (typeof rawResults === 'string') {
-              try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
-          }
-          
-          if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
-             setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
-             alert("⏳ 系統忙碌中，請稍後再試");
-             return;
-          }
+        // --- Handle AI Results from Wix Backend ---
+        if (data.type === 'BATCH_AI_RESULT') {
+            console.log("[App] Processing AI Result:", data);
+            clearAiTimeout(); // Success! Stop the watchdog.
 
-          if (!rawResults || !Array.isArray(rawResults) || rawResults.length === 0) {
-              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
-              alert("⚠️ AI 未返回任何結果，可能是連線問題或內容被過濾，請重試。");
-              
-              setResults(prev => prev.map(item => ({
-                  ...item,
-                  base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-              })));
-              return;
-          }
+            let rawResults = data.results;
+            // Robust parsing: sometimes data comes as a string depending on Wix version
+            if (typeof rawResults === 'string') {
+                try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
+            }
+            
+            if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
+                setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
+                alert("⏳ 系統忙碌中，請稍後再試");
+                return;
+            }
 
-          // Map results back to the existing placeholder items
-          setResults(prevResults => {
-             return prevResults.map((item, index) => {
-                const aiRes = rawResults[index];
-                if (!aiRes) return item;
+            if (!rawResults || !Array.isArray(rawResults) || rawResults.length === 0) {
+                console.warn("[App] AI returned empty or invalid results");
+                setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
+                alert("⚠️ AI 未返回任何結果，可能是連線問題或內容被過濾，請重試。");
                 
-                return {
+                setResults(prev => prev.map(item => ({
                     ...item,
-                    base: {
-                        jp: aiRes.text,
-                        cn: aiRes.translation || item.base.cn
-                    }
-                };
-             });
-          });
+                    base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+                })));
+                return;
+            }
 
-          setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
-          unlockAchievement('ai_awakening');
-      }
+            // Map results back to the existing placeholder items
+            setResults(prevResults => {
+                return prevResults.map((item, index) => {
+                    const aiRes = rawResults[index];
+                    if (!aiRes) return item; // Safety check if fewer results returned
+                    
+                    return {
+                        ...item,
+                        base: {
+                            jp: aiRes.text || item.base.jp, // Fallback to existing if text missing
+                            cn: aiRes.translation || item.base.cn
+                        }
+                    };
+                });
+            });
 
-      // --- Handle AI Error ---
-      if (data.type === 'BATCH_AI_ERROR') {
-          clearAiTimeout(); // Stop watchdog even on error
-          setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
-          alert(data.message || 'AI 請求失敗');
-          
-          setResults(prev => prev.map(item => ({
-              ...item,
-              base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-          })));
+            setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
+            unlockAchievement('ai_awakening');
+        }
+
+        // --- Handle AI Error ---
+        if (data.type === 'BATCH_AI_ERROR') {
+            console.error("[App] Received AI Error:", data.message);
+            clearAiTimeout(); // Stop watchdog even on error
+            setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
+            alert(data.message || 'AI 請求失敗');
+            
+            setResults(prev => prev.map(item => ({
+                ...item,
+                base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+            })));
+        }
+
+      } catch (err) {
+          console.error("[App] CRITICAL ERROR inside handleMessage:", err);
+          clearAiTimeout();
+          setStatus({ type: AppStatusType.IDLE, text: '程式發生錯誤' });
+          alert("⚠️ 處理資料時發生未知錯誤，已重置狀態。");
       }
     };
     
@@ -1004,8 +1015,13 @@ const App: React.FC = () => {
           </span>
         </div>
 
-        {/* Right: Tip */}
+        {/* Right: Tip & Safety Reset */}
         <div className="text-[10px] sm:text-xs text-sub-text font-medium shrink-0 flex items-center gap-1 opacity-70">
+          {status.type !== AppStatusType.IDLE && (
+              <button onClick={() => setStatus({type: AppStatusType.IDLE, text: "重置"})} className="underline text-red-400 hover:text-red-500 mr-2">
+                  重置狀態
+              </button>
+          )}
           <span>💡 點選語句可複製，按鈕可刷新/修改/AI</span>
         </div>
       </div>
