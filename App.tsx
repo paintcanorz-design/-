@@ -197,8 +197,15 @@ const App: React.FC = () => {
              return;
           }
 
-          if (!rawResults || !Array.isArray(rawResults)) {
-              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回有效結果' });
+          if (!rawResults || !Array.isArray(rawResults) || rawResults.length === 0) {
+              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
+              alert("⚠️ AI 未返回任何結果，可能是連線問題或內容被過濾，請重試。");
+              
+              // Visual feedback for failure on the cards
+              setResults(prev => prev.map(item => ({
+                  ...item,
+                  base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+              })));
               return;
           }
 
@@ -226,6 +233,12 @@ const App: React.FC = () => {
       if (data.type === 'BATCH_AI_ERROR') {
           setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
           alert(data.message || 'AI 請求失敗');
+          
+          // Visual feedback for failure
+          setResults(prev => prev.map(item => ({
+              ...item,
+              base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+          })));
       }
     };
     
