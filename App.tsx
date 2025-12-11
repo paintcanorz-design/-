@@ -14,10 +14,9 @@ import {
   WixAiResult
 } from './types';
 import { fetchData } from './services/dataService';
-// Removed direct Gemini service imports to use Wix Backend instead
 import { SettingsModal, HistoryModal, AchievementsModal, WelcomeModal, TutorialModal, LevelModal } from './Modals';
 import { 
-  RefreshCw, Dices, Copy, Volume2, Star, Search, History, Trophy, Settings, Wand2, MessageCircle, ChevronDown, ChevronUp, Plus, Heart
+  RefreshCw, Dices, Copy, Volume2, Star, Search, History, Trophy, Settings, Wand2, MessageCircle, ChevronDown, Plus
 } from 'lucide-react';
 
 // --- Constants & Data ---
@@ -191,7 +190,7 @@ const App: React.FC = () => {
     // Wix Message Listener - Critical for communication
     const handleMessage = (event: MessageEvent) => {
       // 1. Log incoming event for debugging
-      console.log("[App] Incoming Message Event:", event);
+      console.log("[App] Incoming Message Event:", event.data);
       const data = event.data;
 
       // 2. Wrap in Try-Catch to prevent freezing on processing errors
@@ -219,7 +218,7 @@ const App: React.FC = () => {
 
         // --- Handle AI Results from Wix Backend ---
         if (data.type === 'BATCH_AI_RESULT') {
-            console.log("[App] Processing AI Result:", data);
+            console.log("[App] Processing AI Result Payload:", data.results);
             clearAiTimeout(); // Success! Stop the watchdog.
 
             let rawResults = data.results;
@@ -234,21 +233,36 @@ const App: React.FC = () => {
                 return;
             }
 
-            if (!rawResults || !Array.isArray(rawResults) || rawResults.length === 0) {
-                console.warn("[App] AI returned empty or invalid results");
-                setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
-                alert("⚠️ AI 未返回任何結果，可能是連線問題或內容被過濾，請重試。");
-                
-                setResults(prev => prev.map(item => ({
-                    ...item,
-                    base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-                })));
-                return;
+            // Validating array format
+            if (!rawResults || !Array.isArray(rawResults)) {
+                // If it's an object with results inside (some wix versions do this)
+                if (rawResults && rawResults.results && Array.isArray(rawResults.results)) {
+                    rawResults = rawResults.results;
+                } else {
+                    console.warn("[App] AI returned invalid structure:", rawResults);
+                    setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
+                    // Only alert if we actually tried to generate something
+                    setResults(prev => prev.map(item => ({
+                        ...item,
+                        base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+                    })));
+                    return;
+                }
             }
 
-            // Map results back to the existing placeholder items
+            if (rawResults.length === 0) {
+                 console.warn("[App] AI returned empty array");
+                 setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
+                 setResults(prev => prev.map(item => ({
+                    ...item,
+                    base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
+                 })));
+                 return;
+            }
+
+            // Map results back to the existing placeholder items using functional update to get latest state
             setResults(prevResults => {
-                return prevResults.map((item, index) => {
+                const newResults = prevResults.map((item, index) => {
                     const aiRes = rawResults[index];
                     if (!aiRes) return item; // Safety check if fewer results returned
                     
@@ -260,6 +274,7 @@ const App: React.FC = () => {
                         }
                     };
                 });
+                return newResults;
             });
 
             setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
@@ -340,7 +355,6 @@ const App: React.FC = () => {
     const computedStyle = getComputedStyle(root);
     let bg = computedStyle.getPropertyValue('--bg').trim();
     if(bg.startsWith('var(')) {
-        // Simple resolution for nested vars if needed, otherwise fallback
         bg = settings.darkMode ? "#000000" : "#F2F2F7"; 
     }
     window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
@@ -580,6 +594,7 @@ const App: React.FC = () => {
     
     // 1. Generate Placeholders immediately
     const count = settings.resultCount;
+    // Exactly like old code:
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
         jp: targetVal,
         cn: "AI 正在構思色色的描述..."
@@ -615,7 +630,7 @@ const App: React.FC = () => {
     startAiTimeout(); // Start Watchdog
     setStatus({ type: AppStatusType.GEN_REPLY, text: '回覆生成中...' });
 
-    // 1. Generate Placeholders
+    // 1. Generate Placeholders - Exactly like old code "AI 繪師正在構思回覆..."
     const count = settings.resultCount;
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
         jp: targetVal, // User input on left
@@ -629,7 +644,7 @@ const App: React.FC = () => {
     setCurrentSub("回覆生成");
 
     // 2. Send to Wix Backend
-    // Inject instructions for Reply Mode to match backend Prompt Engineering logic
+    // Inject instructions for Reply Mode EXACTLY like the original JS
     const instructions = [
         "(Instruction: Polite/Detailed) ",
         "(Instruction: Emotional/Overwhelmed) ",
