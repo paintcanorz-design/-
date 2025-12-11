@@ -10,12 +10,14 @@ import {
   UserAchievement,
   AppSettings,
   ModalType,
-  SavedCategory
+  SavedCategory,
+  WixAiResult
 } from './types';
 import { fetchData } from './services/dataService';
+// Removed direct Gemini service imports to use Wix Backend instead
 import { SettingsModal, HistoryModal, AchievementsModal, WelcomeModal, TutorialModal, LevelModal } from './Modals';
 import { 
-  RefreshCw, Dices, Copy, Volume2, Star, Search, History, Trophy, Settings, Wand2, MessageCircle, ChevronDown, Plus
+  RefreshCw, Dices, Copy, Volume2, Star, Search, History, Trophy, Settings, Wand2, MessageCircle, ChevronDown, ChevronUp, Plus, Heart
 } from 'lucide-react';
 
 // --- Constants & Data ---
@@ -77,7 +79,6 @@ const App: React.FC = () => {
   const [db, setDb] = useState<Database>({});
   const [loading, setLoading] = useState(true);
   const [isDictExpanded, setIsDictExpanded] = useState(false);
-  const [isDataLoaded, setIsDataLoaded] = useState(false); // Track if we received initial data from Wix
   
   const [currentMain, setCurrentMain] = useState<string | null>(null);
   const [currentSub, setCurrentSub] = useState<string | null>(null);
@@ -96,7 +97,7 @@ const App: React.FC = () => {
   const [activeModal, setActiveModal] = useState<ModalType>('welcome');
   const [welcomeData, setWelcomeData] = useState({ jp: "載入中...", icon: "🎁", stars: 3 });
 
-  // Session counters
+  // Session counters for achievements & Rate Limits
   const regenCountRef = useRef(0);
   const voiceCountRef = useRef(0);
   const copyTimeRef = useRef(0);
@@ -105,45 +106,20 @@ const App: React.FC = () => {
   const cuteStreakRef = useRef(0);
   const themeSetRef = useRef<Set<string>>(new Set());
 
-  // Rate Limiter & Loop Protection Refs
+  // Rate Limiter Refs
   const aiCountRef = useRef(0);
   const aiStartTimeRef = useRef(0);
-  const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
-  // CRITICAL: Refs to prevent infinite loops (Ping-Pong between Wix and React)
-  const isRemoteUpdate = useRef(false); 
-  const isFirstRender = useRef(true);
-
-  // --- Helpers for Safety ---
-  const clearAiTimeout = () => {
-      if (aiTimeoutRef.current) {
-          clearTimeout(aiTimeoutRef.current);
-          aiTimeoutRef.current = null;
-      }
-  };
-
-  const startAiTimeout = () => {
-      clearAiTimeout();
-      aiTimeoutRef.current = setTimeout(() => {
-          setStatus({ type: AppStatusType.IDLE, text: '連線逾時' });
-          alert("⚠️ 連線逾時 (30s)\n後端沒有回應，請檢查網路或手動點擊「重置狀態」。");
-          setResults(prev => prev.map(item => ({
-             ...item,
-             base: { ...item.base, cn: item.base.cn.includes("AI") ? "連線逾時，請重試" : item.base.cn }
-          })));
-      }, 30000); 
-  };
-
 
   // --- Effects ---
 
-  // 1. Init Data
+  // 1. Init Data & Wix Sync
   useEffect(() => {
     const init = async () => {
       const data = await fetchData();
       setDb(data);
       setLoading(false);
       
+      // Init Welcome Data
       const keys = Object.keys(data);
       if (keys.length > 0) {
         const m = data[keys[Math.floor(Math.random() * keys.length)]];
@@ -164,7 +140,7 @@ const App: React.FC = () => {
     };
     init();
 
-    // Load from localStorage as fallback immediately
+    // LocalStorage Load
     try {
       const savedSettings = localStorage.getItem('appSettings');
       if (savedSettings) {
@@ -187,186 +163,101 @@ const App: React.FC = () => {
       const savedAchieve = localStorage.getItem('userAchieve');
       if (savedAchieve) setUserAchieve(JSON.parse(savedAchieve));
     } catch(e) {}
-  }, []);
 
-  // 2. Wix Connection Handshake
-  // We use a less aggressive interval (3s) and only start it if we haven't loaded data yet.
-  useEffect(() => {
-    if (isDataLoaded) return;
-
-    // Wait a bit before starting the handshake to allow Wix page to fully load
-    const startTimeout = setTimeout(() => {
-        const intervalId = setInterval(() => {
-            // Only send request if we haven't received data yet
-            if(!isDataLoaded) {
-                 window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
-            }
-        }, 3000); // 3 seconds interval
-
-        return () => clearInterval(intervalId);
-    }, 1000);
-
-    return () => clearTimeout(startTimeout);
-  }, [isDataLoaded]);
-
-  // 3. Wix Message Listener
-  useEffect(() => {
+    // Wix Message Listener - Critical for communication
     const handleMessage = (event: MessageEvent) => {
-      let data = event.data;
+      const data = event.data;
+      
+      // --- Handle Load Data from Wix ---
+      if (data.type === 'LOAD_DATA' && data.payload) {
+         try {
+             const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
+             if(payload.appSettings) {
+                 setSettings(prev => ({ 
+                     ...prev, 
+                     ...payload.appSettings,
+                     activeFaces: payload.appSettings.activeFaces || prev.activeFaces || DEFAULT_FACES,
+                     activeDecor: payload.appSettings.activeDecor || prev.activeDecor || DEFAULT_DECOR
+                 }));
+             }
+             if(payload.favorites) setFavorites(payload.favorites);
+             if(payload.savedSubCategories) setSavedCategories(payload.savedSubCategories);
+             if(payload.historyLog) setHistoryLog(payload.historyLog);
+             if(payload.userAchieve) setUserAchieve(payload.userAchieve);
+         } catch(e) { console.error("Parse error", e); }
+      }
 
-      try {
-        if (!data) return;
-        
-        // Handle parsing if data is string (Wix sometimes sends strings)
-        if (typeof data === 'string') {
-            try { data = JSON.parse(data); } catch(e) { /* ignore */ }
-        }
+      // --- Handle AI Results from Wix Backend ---
+      if (data.type === 'BATCH_AI_RESULT') {
+          const rawResults = data.results as WixAiResult[];
+          
+          if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
+             setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
+             alert("⏳ 系統忙碌中，請稍後再試");
+             return;
+          }
 
-        // --- Handle Load Data from Wix ---
-        if (data.type === 'LOAD_DATA' && data.payload) {
-            setIsDataLoaded(true); // Stop Handshake
-            
-            // LOCK: Mark this update as remote so we don't save it back immediately
-            isRemoteUpdate.current = true;
+          if (!rawResults || !Array.isArray(rawResults)) {
+              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回有效結果' });
+              return;
+          }
 
-            try {
-                const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
-                if(payload.appSettings) {
-                    setSettings(prev => ({ 
-                        ...prev, 
-                        ...payload.appSettings,
-                        activeFaces: payload.appSettings.activeFaces || prev.activeFaces || DEFAULT_FACES,
-                        activeDecor: payload.appSettings.activeDecor || prev.activeDecor || DEFAULT_DECOR
-                    }));
-                }
-                if(payload.favorites) setFavorites(payload.favorites);
-                if(payload.savedSubCategories) setSavedCategories(payload.savedSubCategories);
-                if(payload.historyLog) setHistoryLog(payload.historyLog);
-                if(payload.userAchieve) setUserAchieve(payload.userAchieve);
-            } catch(e) { console.error("Parse error", e); }
-        }
-
-        // --- Handle AI Results from Wix Backend ---
-        if (data.type === 'BATCH_AI_RESULT') {
-            clearAiTimeout(); 
-
-            let rawResults = data.results;
-            if (typeof rawResults === 'string') {
-                try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
-            }
-            
-            if(rawResults && rawResults.error === 'RATE_LIMIT') {
-                setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
-                alert("⏳ 系統忙碌中，請稍後再試");
-                return;
-            }
-
-            if (!rawResults || !Array.isArray(rawResults)) {
-                if (rawResults && rawResults.results && Array.isArray(rawResults.results)) {
-                    rawResults = rawResults.results;
-                } else {
-                    console.warn("[App] AI returned invalid structure:", rawResults);
-                    setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
-                    setResults(prev => prev.map(item => ({
-                        ...item,
-                        base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-                    })));
-                    return;
-                }
-            }
-
-            if (rawResults.length === 0) {
-                 setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
-                 setResults(prev => prev.map(item => ({
+          // Map results back to the existing placeholder items
+          setResults(prevResults => {
+             return prevResults.map((item, index) => {
+                const aiRes = rawResults[index];
+                if (!aiRes) return item;
+                
+                return {
                     ...item,
-                    base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-                 })));
-                 return;
-            }
+                    base: {
+                        jp: aiRes.text,
+                        cn: aiRes.translation || item.base.cn
+                    }
+                };
+             });
+          });
 
-            setResults(prevResults => {
-                return prevResults.map((item, index) => {
-                    const aiRes = rawResults[index];
-                    if (!aiRes) return item; 
-                    
-                    return {
-                        ...item,
-                        base: {
-                            jp: aiRes.text || item.base.jp,
-                            cn: aiRes.translation || item.base.cn
-                        }
-                    };
-                });
-            });
+          setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
+          unlockAchievement('ai_awakening');
+      }
 
-            setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
-            unlockAchievement('ai_awakening');
-        }
-
-        // --- Handle AI Error ---
-        if (data.type === 'BATCH_AI_ERROR') {
-            clearAiTimeout();
-            setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
-            alert(data.message || 'AI 請求失敗');
-            
-            setResults(prev => prev.map(item => ({
-                ...item,
-                base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
-            })));
-        }
-
-      } catch (err) {
-          console.error("[App] CRITICAL ERROR inside handleMessage:", err);
-          clearAiTimeout();
-          setStatus({ type: AppStatusType.IDLE, text: '程式發生錯誤' });
+      // --- Handle AI Error ---
+      if (data.type === 'BATCH_AI_ERROR') {
+          setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
+          alert(data.message || 'AI 請求失敗');
       }
     };
     
     window.addEventListener('message', handleMessage);
-    return () => {
-        window.removeEventListener('message', handleMessage);
-        clearAiTimeout();
-    };
+    // Request load from parent (Wix)
+    window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
+
+    return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  // 4. Persist & Sync to Wix with Loop Protection
+  // 2. Persist & Sync to Wix
   useEffect(() => {
-    // Save to LocalStorage immediately
     localStorage.setItem('appSettings', JSON.stringify(settings));
     localStorage.setItem('favorites', JSON.stringify(favorites));
     localStorage.setItem('savedCategories', JSON.stringify(savedCategories));
     localStorage.setItem('historyLog', JSON.stringify(historyLog));
     localStorage.setItem('userAchieve', JSON.stringify(userAchieve));
     
-    // Skip saving on the very first render to avoid sending empty/default data unnecessarily
-    if (isFirstRender.current) {
-        isFirstRender.current = false;
-        return;
-    }
-
-    // CRITICAL: Check if this update came from Wix (Remote). If so, do NOT send it back.
-    if (isRemoteUpdate.current) {
-        isRemoteUpdate.current = false; // Reset the lock for next time
-        return;
-    }
-
-    // Debounce the postMessage to Wix
-    const timeoutId = setTimeout(() => {
-        const backupData = { 
-            appSettings: settings, 
-            favorites, 
-            savedSubCategories: savedCategories, 
-            historyLog, 
-            userAchieve,
-            currentDisplayState: results 
-        };
-        window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
-    }, 1000); 
-
-    return () => clearTimeout(timeoutId);
+    // Wix Sync
+    const backupData = { 
+        appSettings: settings, 
+        favorites, 
+        savedSubCategories: savedCategories, 
+        historyLog, 
+        userAchieve,
+        // Sync current display state so user doesn't lose data on refresh if Wix supports it
+        currentDisplayState: results 
+    };
+    window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
   }, [settings, favorites, savedCategories, historyLog, userAchieve, results]);
 
-  // 5. Theme Application
+  // 3. Theme Application & Dark Mode
   useEffect(() => {
     const root = document.documentElement;
     root.classList.forEach(c => {
@@ -376,6 +267,7 @@ const App: React.FC = () => {
       root.classList.add(`theme-${settings.userTheme}`);
     }
 
+    // Dark Mode Logic
     if (settings.darkMode) {
         root.classList.add('dark');
         root.classList.add('dark-mode');
@@ -384,20 +276,20 @@ const App: React.FC = () => {
         root.classList.remove('dark-mode');
     }
 
-    // Send BG change only if it's a real change (throttled by the nature of react state)
-    // We don't need strict loop protection here as this is a one-way visual sync usually
     const computedStyle = getComputedStyle(root);
     let bg = computedStyle.getPropertyValue('--bg').trim();
     if(bg.startsWith('var(')) {
+        // Simple resolution for nested vars if needed, otherwise fallback
         bg = settings.darkMode ? "#000000" : "#F2F2F7"; 
     }
     window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
 
+    // Track Theme Usage
     themeSetRef.current.add(settings.userTheme);
     if(themeSetRef.current.size >= 3) unlockAchievement('color_master');
   }, [settings.userTheme, settings.darkMode]);
 
-  // 6. Other Checks
+  // 4. Other Checks
   useEffect(() => {
       if (!settings.showCN) unlockAchievement('n1_japanese');
       if (settings.activeFaces?.length > DEFAULT_FACES.length) unlockAchievement('custom_emoji');
@@ -466,6 +358,7 @@ const App: React.FC = () => {
     const decorList = (settings.activeDecor && settings.activeDecor.length > 0) ? settings.activeDecor : DEFAULT_DECOR;
     
     if (style === EmojiStyle.CUSTOM) {
+        // Custom mix logic
         const min = settings.customMin;
         const max = settings.customMax;
         const count = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -475,6 +368,7 @@ const App: React.FC = () => {
         return " " + result;
     }
     
+    // Default Faces style
     const face = faces[Math.floor(Math.random() * faces.length)];
     const decorCount = Math.floor(Math.random() * 3) + 1;
     let decor = "";
@@ -507,6 +401,7 @@ const App: React.FC = () => {
     if (settings.totalCopies + 1 >= 50) unlockAchievement('copy_50');
     if (settings.totalCopies + 1 >= 500) unlockAchievement('copy_500');
 
+    // Combo Logic
     const now = Date.now();
     if (now - copyTimeRef.current < 10000) {
         copyComboRef.current += 1;
@@ -520,6 +415,7 @@ const App: React.FC = () => {
   };
 
   const handleSpeak = (text: string) => {
+    // Strip emojis for TTS
     const cleanText = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
     const u = new SpeechSynthesisUtterance(cleanText);
     u.lang = 'ja-JP';
@@ -579,11 +475,12 @@ const App: React.FC = () => {
   };
 
   const handleRegen = () => {
+    // Logic: if currentMain is "自訂生成", re-trigger the appropriate AI function
     if (currentMain === "自訂生成") {
         if (currentSub === "回覆生成") {
-            handleAiReply(true);
+            handleAiReply(true); // Retry Reply
         } else {
-            handleAiKeyword(true);
+            handleAiKeyword(true); // Retry Keyword
         }
         return;
     }
@@ -611,28 +508,29 @@ const App: React.FC = () => {
         alert("⚠️ 請先輸入想要生成的關鍵字！");
         return;
     }
+    // For retry, we might use currentSub as the value if it was saved there
     const targetVal = val || (isRetry && currentMain === "自訂生成" ? currentSub : ""); 
     if(!targetVal) return;
 
     if (!checkAiRateLimit()) return;
 
-    startAiTimeout(); 
     setStatus({ type: AppStatusType.GEN_KEYWORD, text: '關鍵語句生成中...' });
     
-    // 1. Generate Placeholders
+    // 1. Generate Placeholders immediately
     const count = settings.resultCount;
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
         jp: targetVal,
         cn: "AI 正在構思色色的描述..."
     }));
     
+    // Set results to placeholders so UI updates immediately
     setResults(createResultsFromPhrases(placeholders));
     
     // Set Context
     setCurrentMain("自訂生成");
     setCurrentSub(targetVal);
 
-    // 2. Send to Wix Backend (Just array of strings, like original HTML)
+    // 2. Send to Wix Backend
     const phrasesToRewrite = new Array(count).fill(targetVal);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
@@ -647,19 +545,21 @@ const App: React.FC = () => {
          alert("⚠️ 請先輸入或貼上要回覆的內容！");
          return;
     }
+    // For retry, we assume the input is still in the box or we just use the box value
+    // The legacy code doesn't store the reply input in subKey for retry effectively unless we persist it. 
+    // We will rely on inputValue for simplicity or the 'base' of existing results if we wanted to be complex.
     const targetVal = val; 
     if(!targetVal) return;
 
     if (!checkAiRateLimit()) return;
 
-    startAiTimeout();
     setStatus({ type: AppStatusType.GEN_REPLY, text: '回覆生成中...' });
 
     // 1. Generate Placeholders
     const count = settings.resultCount;
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
-        jp: targetVal, 
-        cn: "AI 繪師正在構思回覆..."
+        jp: targetVal, // User input on left
+        cn: "AI 繪師正在構思回覆..." // Loading text on right
     }));
     
     setResults(createResultsFromPhrases(placeholders));
@@ -669,18 +569,7 @@ const App: React.FC = () => {
     setCurrentSub("回覆生成");
 
     // 2. Send to Wix Backend
-    // CRITICAL FIX: Inject instructions manually here.
-    const instructions = [
-        "(Instruction: Polite/Detailed) ",
-        "(Instruction: Emotional/Overwhelmed) ",
-        "(Instruction: Cool/Casual) "
-    ];
-    
-    const phrasesToRewrite = new Array(count).fill(targetVal).map((t, index) => {
-        const instr = instructions[index % instructions.length];
-        return `${instr}${t}`;
-    });
-
+    const phrasesToRewrite = new Array(count).fill(targetVal);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
         phrases: phrasesToRewrite, 
@@ -705,7 +594,6 @@ const App: React.FC = () => {
         contextSub = currentSub || "通用";
     }
     
-    startAiTimeout();
     setStatus({ type: AppStatusType.AI_REWRITING, text: `AI 改寫中...` });
     
     // Send to Wix Backend
@@ -1055,13 +943,8 @@ const App: React.FC = () => {
           </span>
         </div>
 
-        {/* Right: Tip & Safety Reset */}
+        {/* Right: Tip */}
         <div className="text-[10px] sm:text-xs text-sub-text font-medium shrink-0 flex items-center gap-1 opacity-70">
-          {status.type !== AppStatusType.IDLE && (
-              <button onClick={() => setStatus({type: AppStatusType.IDLE, text: "重置"})} className="underline text-red-400 hover:text-red-500 mr-2">
-                  重置狀態
-              </button>
-          )}
           <span>💡 點選語句可複製，按鈕可刷新/修改/AI</span>
         </div>
       </div>
