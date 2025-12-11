@@ -77,6 +77,7 @@ const App: React.FC = () => {
   const [db, setDb] = useState<Database>({});
   const [loading, setLoading] = useState(true);
   const [isDictExpanded, setIsDictExpanded] = useState(false);
+  const [isDataLoaded, setIsDataLoaded] = useState(false); // Track if we received initial data from Wix
   
   const [currentMain, setCurrentMain] = useState<string | null>(null);
   const [currentSub, setCurrentSub] = useState<string | null>(null);
@@ -134,7 +135,7 @@ const App: React.FC = () => {
 
   // --- Effects ---
 
-  // 1. Init Data & Wix Sync
+  // 1. Init Data
   useEffect(() => {
     const init = async () => {
       const data = await fetchData();
@@ -161,6 +162,7 @@ const App: React.FC = () => {
     };
     init();
 
+    // Load from localStorage as fallback
     try {
       const savedSettings = localStorage.getItem('appSettings');
       if (savedSettings) {
@@ -183,21 +185,37 @@ const App: React.FC = () => {
       const savedAchieve = localStorage.getItem('userAchieve');
       if (savedAchieve) setUserAchieve(JSON.parse(savedAchieve));
     } catch(e) {}
+  }, []);
 
-    // Wix Message Listener - Critical for communication
+  // 2. Wix Connection Handshake (Critical for preventing CPU spikes and ensuring connection)
+  useEffect(() => {
+    // Only try to connect if we haven't received data from Wix yet
+    if (isDataLoaded) return;
+
+    const intervalId = setInterval(() => {
+        // Send request to Wix Parent repeatedly until we get a response (LOAD_DATA)
+        // This replaces the old 'wixConnectionInterval' logic
+        window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
+    }, 2000);
+
+    return () => clearInterval(intervalId);
+  }, [isDataLoaded]);
+
+  // 3. Wix Message Listener
+  useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       let data = event.data;
 
       try {
         if (!data) return;
         
-        // Wix sometimes wraps data in structure, sometimes not. Handle string parsing.
         if (typeof data === 'string') {
             try { data = JSON.parse(data); } catch(e) { /* ignore */ }
         }
 
         // --- Handle Load Data from Wix ---
         if (data.type === 'LOAD_DATA' && data.payload) {
+            setIsDataLoaded(true); // Mark connection as successful
             try {
                 const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
                 if(payload.appSettings) {
@@ -221,7 +239,6 @@ const App: React.FC = () => {
 
             let rawResults = data.results;
             
-            // Critical Fix: Handle if results is a JSON string OR an object
             if (typeof rawResults === 'string') {
                 try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
             }
@@ -232,7 +249,6 @@ const App: React.FC = () => {
                 return;
             }
 
-            // Validating array format
             if (!rawResults || !Array.isArray(rawResults)) {
                 if (rawResults && rawResults.results && Array.isArray(rawResults.results)) {
                     rawResults = rawResults.results;
@@ -256,7 +272,6 @@ const App: React.FC = () => {
                  return;
             }
 
-            // Success: Map results back to the existing placeholder items
             setResults(prevResults => {
                 return prevResults.map((item, index) => {
                     const aiRes = rawResults[index];
@@ -296,36 +311,38 @@ const App: React.FC = () => {
     };
     
     window.addEventListener('message', handleMessage);
-    // Request load from parent (Wix)
-    window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
-
     return () => {
         window.removeEventListener('message', handleMessage);
         clearAiTimeout();
     };
   }, []);
 
-  // 2. Persist & Sync to Wix
+  // 4. Persist & Sync to Wix with DEBOUNCE (Fixes CPU Spike/Infinite Loop)
   useEffect(() => {
+    // Save to LocalStorage immediately
     localStorage.setItem('appSettings', JSON.stringify(settings));
     localStorage.setItem('favorites', JSON.stringify(favorites));
     localStorage.setItem('savedCategories', JSON.stringify(savedCategories));
     localStorage.setItem('historyLog', JSON.stringify(historyLog));
     localStorage.setItem('userAchieve', JSON.stringify(userAchieve));
     
-    // Wix Sync
-    const backupData = { 
-        appSettings: settings, 
-        favorites, 
-        savedSubCategories: savedCategories, 
-        historyLog, 
-        userAchieve,
-        currentDisplayState: results 
-    };
-    window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
+    // Debounce the postMessage to Wix to prevent infinite loops if Wix replies with LOAD_DATA
+    const timeoutId = setTimeout(() => {
+        const backupData = { 
+            appSettings: settings, 
+            favorites, 
+            savedSubCategories: savedCategories, 
+            historyLog, 
+            userAchieve,
+            currentDisplayState: results 
+        };
+        window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
+    }, 1000); // Wait 1 second after last change before sending
+
+    return () => clearTimeout(timeoutId);
   }, [settings, favorites, savedCategories, historyLog, userAchieve, results]);
 
-  // 3. Theme Application & Dark Mode
+  // 5. Theme Application
   useEffect(() => {
     const root = document.documentElement;
     root.classList.forEach(c => {
@@ -348,13 +365,14 @@ const App: React.FC = () => {
     if(bg.startsWith('var(')) {
         bg = settings.darkMode ? "#000000" : "#F2F2F7"; 
     }
+    // Also debounce background color changes slightly to be safe, or just fire
     window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
 
     themeSetRef.current.add(settings.userTheme);
     if(themeSetRef.current.size >= 3) unlockAchievement('color_master');
   }, [settings.userTheme, settings.darkMode]);
 
-  // 4. Other Checks
+  // 6. Other Checks
   useEffect(() => {
       if (!settings.showCN) unlockAchievement('n1_japanese');
       if (settings.activeFaces?.length > DEFAULT_FACES.length) unlockAchievement('custom_emoji');
@@ -627,8 +645,6 @@ const App: React.FC = () => {
 
     // 2. Send to Wix Backend
     // CRITICAL FIX: Inject instructions manually here.
-    // The backend expects instructions in the text to trigger tone logic.
-    // We match the original JS logic that might have been implicit or required by backend.
     const instructions = [
         "(Instruction: Polite/Detailed) ",
         "(Instruction: Emotional/Overwhelmed) ",
