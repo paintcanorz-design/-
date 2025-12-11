@@ -97,7 +97,7 @@ const App: React.FC = () => {
   const [activeModal, setActiveModal] = useState<ModalType>('welcome');
   const [welcomeData, setWelcomeData] = useState({ jp: "載入中...", icon: "🎁", stars: 3 });
 
-  // Session counters for achievements
+  // Session counters for achievements & Rate Limits
   const regenCountRef = useRef(0);
   const voiceCountRef = useRef(0);
   const copyTimeRef = useRef(0);
@@ -105,6 +105,10 @@ const App: React.FC = () => {
   const eroticStreakRef = useRef(0);
   const cuteStreakRef = useRef(0);
   const themeSetRef = useRef<Set<string>>(new Set());
+
+  // Rate Limiter Refs
+  const aiCountRef = useRef(0);
+  const aiStartTimeRef = useRef(0);
 
   // --- Effects ---
 
@@ -186,20 +190,35 @@ const App: React.FC = () => {
       // --- Handle AI Results from Wix Backend ---
       if (data.type === 'BATCH_AI_RESULT') {
           const rawResults = data.results as WixAiResult[];
-          if (!rawResults || rawResults.length === 0) {
-              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回結果' });
+          
+          if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
+             setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
+             alert("⏳ 系統忙碌中，請稍後再試");
+             return;
+          }
+
+          if (!rawResults || !Array.isArray(rawResults)) {
+              setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回有效結果' });
               return;
           }
 
-          // Convert Wix Backend format {text, translation} to App format {jp, cn}
-          const convertedPhrases: Phrase[] = rawResults.map(r => ({
-              jp: r.text,
-              cn: r.translation
-          }));
+          // Map results back to the existing placeholder items
+          setResults(prevResults => {
+             return prevResults.map((item, index) => {
+                const aiRes = rawResults[index];
+                if (!aiRes) return item;
+                
+                return {
+                    ...item,
+                    base: {
+                        jp: aiRes.text,
+                        cn: aiRes.translation || item.base.cn
+                    }
+                };
+             });
+          });
 
-          setResults(createResultsFromPhrases(convertedPhrases));
           setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
-          setCurrentSub(null); 
           unlockAchievement('ai_awakening');
       }
 
@@ -231,10 +250,12 @@ const App: React.FC = () => {
         favorites, 
         savedSubCategories: savedCategories, 
         historyLog, 
-        userAchieve 
+        userAchieve,
+        // Sync current display state so user doesn't lose data on refresh if Wix supports it
+        currentDisplayState: results 
     };
     window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
-  }, [settings, favorites, savedCategories, historyLog, userAchieve]);
+  }, [settings, favorites, savedCategories, historyLog, userAchieve, results]);
 
   // 3. Theme Application & Dark Mode
   useEffect(() => {
@@ -256,8 +277,12 @@ const App: React.FC = () => {
     }
 
     const computedStyle = getComputedStyle(root);
-    const bg = computedStyle.getPropertyValue('--bg').trim();
-    window.parent.postMessage({ type: 'CHANGE_BG', color: bg || '#F2F2F7' }, "*");
+    let bg = computedStyle.getPropertyValue('--bg').trim();
+    if(bg.startsWith('var(')) {
+        // Simple resolution for nested vars if needed, otherwise fallback
+        bg = settings.darkMode ? "#000000" : "#F2F2F7"; 
+    }
+    window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
 
     // Track Theme Usage
     themeSetRef.current.add(settings.userTheme);
@@ -284,6 +309,26 @@ const App: React.FC = () => {
 
 
   // --- Logic Helpers ---
+
+  const checkAiRateLimit = () => {
+      const now = Date.now();
+      const MAX_PER_MINUTE = 5;
+
+      if (now - aiStartTimeRef.current > 60000) {
+          aiCountRef.current = 0;
+          aiStartTimeRef.current = now;
+      }
+      
+      if (aiCountRef.current === 0) aiStartTimeRef.current = now;
+
+      if (aiCountRef.current >= MAX_PER_MINUTE) {
+          alert("休息一下，靈感正在冷卻中 🧊\n(每分鐘限制 5 次)");
+          return false;
+      }
+      
+      aiCountRef.current++;
+      return true;
+  };
 
   const unlockAchievement = (id: string) => {
     if (settings.hideFun || userAchieve[id]?.unlocked || !ACHIEVEMENTS_DATA[id]) return;
@@ -313,13 +358,22 @@ const App: React.FC = () => {
     const decorList = (settings.activeDecor && settings.activeDecor.length > 0) ? settings.activeDecor : DEFAULT_DECOR;
     
     if (style === EmojiStyle.CUSTOM) {
-        return " " + faces[0] + decorList[0]; 
+        // Custom mix logic
+        const min = settings.customMin;
+        const max = settings.customMax;
+        const count = Math.floor(Math.random() * (max - min + 1)) + min;
+        
+        let result = faces[Math.floor(Math.random() * faces.length)];
+        for(let i=1; i<count; i++) result += decorList[Math.floor(Math.random() * decorList.length)];
+        return " " + result;
     }
     
+    // Default Faces style
     const face = faces[Math.floor(Math.random() * faces.length)];
     const decorCount = Math.floor(Math.random() * 3) + 1;
     let decor = "";
-    for(let i=0; i<decorCount; i++) decor += decorList[Math.floor(Math.random() * decorList.length)];
+    const selectedDecor = decorList[Math.floor(Math.random() * decorList.length)];
+    for(let i=1; i<decorCount; i++) decor += selectedDecor;
     return " " + face + decor;
   };
 
@@ -361,10 +415,13 @@ const App: React.FC = () => {
   };
 
   const handleSpeak = (text: string) => {
-    const u = new SpeechSynthesisUtterance(text);
+    // Strip emojis for TTS
+    const cleanText = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+    const u = new SpeechSynthesisUtterance(cleanText);
     u.lang = 'ja-JP';
     u.rate = settings.voiceRate;
     u.pitch = settings.voicePitch;
+    window.speechSynthesis.cancel();
     window.speechSynthesis.speak(u);
     voiceCountRef.current += 1;
     if (voiceCountRef.current >= 10) unlockAchievement('voice_lover');
@@ -418,6 +475,16 @@ const App: React.FC = () => {
   };
 
   const handleRegen = () => {
+    // Logic: if currentMain is "自訂生成", re-trigger the appropriate AI function
+    if (currentMain === "自訂生成") {
+        if (currentSub === "回覆生成") {
+            handleAiReply(true); // Retry Reply
+        } else {
+            handleAiKeyword(true); // Retry Keyword
+        }
+        return;
+    }
+
     if (status.type !== AppStatusType.SELECTED || !currentMain || !currentSub) return;
     
     const subData = db[currentMain]?.subs[currentSub];
@@ -435,42 +502,106 @@ const App: React.FC = () => {
 
   // --- UPDATED AI HANDLERS to use Wix Backend via postMessage ---
 
-  const handleAiKeyword = async () => {
-    if (!inputValue.trim()) return;
+  const handleAiKeyword = async (isRetry = false) => {
+    const val = inputValue.trim();
+    if (!val && !isRetry) {
+        alert("⚠️ 請先輸入想要生成的關鍵字！");
+        return;
+    }
+    // For retry, we might use currentSub as the value if it was saved there
+    const targetVal = val || (isRetry && currentMain === "自訂生成" ? currentSub : ""); 
+    if(!targetVal) return;
+
+    if (!checkAiRateLimit()) return;
+
     setStatus({ type: AppStatusType.GEN_KEYWORD, text: '關鍵語句生成中...' });
-    setResults([]);
-    // Send to Wix Backend
+    
+    // 1. Generate Placeholders immediately
+    const count = settings.resultCount;
+    const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
+        jp: targetVal,
+        cn: "AI 正在構思色色的描述..."
+    }));
+    
+    // Set results to placeholders so UI updates immediately
+    setResults(createResultsFromPhrases(placeholders));
+    
+    // Set Context
+    setCurrentMain("自訂生成");
+    setCurrentSub(targetVal);
+
+    // 2. Send to Wix Backend
+    const phrasesToRewrite = new Array(count).fill(targetVal);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
-        phrases: [inputValue], // Pass as array for backend compatibility
-        context: { main: "Keyword", sub: inputValue } 
+        phrases: phrasesToRewrite, 
+        context: { main: "使用者自訂", sub: targetVal } 
     }, "*"); 
   };
 
-  const handleAiReply = async () => {
-    if (!inputValue.trim()) return;
+  const handleAiReply = async (isRetry = false) => {
+    const val = inputValue.trim();
+    if (!val && !isRetry) {
+         alert("⚠️ 請先輸入或貼上要回覆的內容！");
+         return;
+    }
+    // For retry, we assume the input is still in the box or we just use the box value
+    // The legacy code doesn't store the reply input in subKey for retry effectively unless we persist it. 
+    // We will rely on inputValue for simplicity or the 'base' of existing results if we wanted to be complex.
+    const targetVal = val; 
+    if(!targetVal) return;
+
+    if (!checkAiRateLimit()) return;
+
     setStatus({ type: AppStatusType.GEN_REPLY, text: '回覆生成中...' });
-    setResults([]);
-    // Send to Wix Backend (Triggers 'ReplyMode' in your backend code)
+
+    // 1. Generate Placeholders
+    const count = settings.resultCount;
+    const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
+        jp: targetVal, // User input on left
+        cn: "AI 繪師正在構思回覆..." // Loading text on right
+    }));
+    
+    setResults(createResultsFromPhrases(placeholders));
+
+    // Set Context
+    setCurrentMain("自訂生成");
+    setCurrentSub("回覆生成");
+
+    // 2. Send to Wix Backend
+    const phrasesToRewrite = new Array(count).fill(targetVal);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
-        phrases: [inputValue], 
+        phrases: phrasesToRewrite, 
         context: { main: "ReplyMode", sub: "ArtistReply" } 
     }, "*"); 
   };
 
   const handleAiRewrite = async () => {
     if (results.length === 0) return;
-    const context = currentSub ? db[currentMain!]?.subs[currentSub]?.label : "自訂";
+    if (!checkAiRateLimit()) return;
+
+    let contextMain = "一般";
+    let contextSub = "通用";
+
+    if (currentMain && db[currentMain]) {
+        contextMain = db[currentMain].label;
+        if (currentSub && db[currentMain].subs[currentSub]) {
+            contextSub = db[currentMain].subs[currentSub].label;
+        }
+    } else if (currentMain === '自訂生成') {
+        contextMain = "使用者自訂";
+        contextSub = currentSub || "通用";
+    }
     
-    setStatus({ type: AppStatusType.AI_REWRITING, text: `${context} + AI改寫中...` });
+    setStatus({ type: AppStatusType.AI_REWRITING, text: `AI 改寫中...` });
     
     // Send to Wix Backend
     const originalPhrases = results.map(r => r.base.jp);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
         phrases: originalPhrases, 
-        context: { main: context, sub: "Rewrite" } 
+        context: { main: contextMain, sub: contextSub } 
     }, "*");
   };
 
@@ -544,8 +675,12 @@ const App: React.FC = () => {
       if (s === EmojiStyle.KAOMOJI) unlockAchievement('kaomoji_fan');
   }
 
-  const isRegenDisabled = status.type !== AppStatusType.SELECTED;
-  const isAiRewriteDisabled = results.length === 0 || status.type === AppStatusType.GEN_REPLY || status.type === AppStatusType.GEN_KEYWORD || status.type === AppStatusType.AI_REWRITING;
+  // Regen is disabled if we are waiting for AI, OR if we haven't selected anything yet.
+  // Exception: If we just did a Custom Gen, we allow Regen to trigger a retry of that generation.
+  const isAiProcessing = status.type === AppStatusType.GEN_KEYWORD || status.type === AppStatusType.GEN_REPLY || status.type === AppStatusType.AI_REWRITING;
+  const isRegenDisabled = isAiProcessing || (status.type !== AppStatusType.SELECTED && currentMain !== "自訂生成");
+
+  const isAiRewriteDisabled = results.length === 0 || isAiProcessing;
   const userLevelTitle = LEVEL_TITLES[Math.floor(settings.userLevel / 10) * 10 + (settings.userLevel < 10 ? 1 : 0)] || LEVEL_TITLES[100];
   const isCurrentFeatured = currentMain && currentSub && savedCategories.some(c => c.main === currentMain && c.sub === currentSub);
 
@@ -687,9 +822,9 @@ const App: React.FC = () => {
                       </div>
                       
                       {/* Add to Featured Button */}
-                      {currentMain && currentMain !== 'featured' && currentSub && (
+                      {currentMain && currentMain !== 'featured' && currentSub && currentMain !== "自訂生成" && (
                           <button 
-                            onClick={() => toggleFeaturedCategory(currentMain, currentSub, db[currentMain].subs[currentSub].label)}
+                            onClick={() => toggleFeaturedCategory(currentMain!, currentSub!, db[currentMain!]?.subs[currentSub!]?.label || "")}
                             className={`text-xs px-3 py-1 rounded-full font-bold flex items-center gap-1 transition-all
                               ${isCurrentFeatured 
                                 ? 'bg-red-50 text-red-500 border border-red-200' 
@@ -729,7 +864,7 @@ const App: React.FC = () => {
                             Object.entries(db[currentMain].subs).map(([key, sub]) => (
                                 <button
                                   key={key}
-                                  onClick={() => handleSelectSub(currentMain, key)}
+                                  onClick={() => handleSelectSub(currentMain!, key)}
                                   className={`
                                     px-2 py-2 rounded-full text-xs sm:text-sm font-medium transition-all duration-200 truncate
                                     ${currentSub === key 
@@ -741,7 +876,9 @@ const App: React.FC = () => {
                                 </button>
                             ))
                          ) : (
-                             <div className="col-span-full text-center text-xs text-sub-text py-2">請選擇上方分類...</div>
+                             <div className="col-span-full text-center text-xs text-sub-text py-2">
+                                 {currentMain === "自訂生成" ? "✨ 正在使用 AI 功能" : "請選擇上方分類..."}
+                             </div>
                          )
                       )}
                    </div>
@@ -757,22 +894,35 @@ const App: React.FC = () => {
           type="text"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleAiKeyword()}
+          onKeyDown={(e) => e.key === 'Enter' && handleAiKeyword(false)}
           placeholder="✨ 輸入關鍵字句 或 貼上粉絲留言..."
-          className="flex-1 bg-bg dark:bg-zinc-800 border-none rounded-full px-5 py-3 text-sm outline-none focus:ring-2 focus:ring-primary text-text transition-all placeholder:text-sub-text"
+          disabled={isAiProcessing}
+          className="flex-1 bg-bg dark:bg-zinc-800 border-none rounded-full px-5 py-3 text-sm outline-none focus:ring-2 focus:ring-primary text-text transition-all placeholder:text-sub-text disabled:opacity-50"
         />
         <div className="flex gap-2">
           <button 
-            onClick={handleAiKeyword}
-            className="flex-1 sm:flex-none whitespace-nowrap bg-gradient-to-br from-secondary to-primary text-white px-5 py-3 rounded-full text-sm font-bold shadow-sm active:scale-95 transition-transform hover:brightness-110"
+            onClick={() => handleAiKeyword(false)}
+            disabled={isAiProcessing}
+            className={`flex-1 sm:flex-none whitespace-nowrap px-5 py-3 rounded-full text-sm font-bold shadow-sm transition-all
+                ${isAiProcessing 
+                    ? 'bg-zinc-300 text-zinc-500 cursor-not-allowed'
+                    : 'bg-gradient-to-br from-secondary to-primary text-white active:scale-95 hover:brightness-110'
+                }
+            `}
           >
-            AI 生成
+            {status.type === AppStatusType.GEN_KEYWORD ? '詠唱中...' : 'AI 生成'}
           </button>
           <button 
-            onClick={handleAiReply}
-            className="flex-1 sm:flex-none whitespace-nowrap bg-gradient-to-br from-secondary to-primary text-white px-5 py-3 rounded-full text-sm font-bold shadow-sm active:scale-95 transition-transform hover:brightness-110"
+            onClick={() => handleAiReply(false)}
+            disabled={isAiProcessing}
+            className={`flex-1 sm:flex-none whitespace-nowrap px-5 py-3 rounded-full text-sm font-bold shadow-sm transition-all
+                ${isAiProcessing 
+                    ? 'bg-zinc-300 text-zinc-500 cursor-not-allowed'
+                    : 'bg-gradient-to-br from-secondary to-primary text-white active:scale-95 hover:brightness-110'
+                }
+            `}
           >
-            AI 回覆
+            {status.type === AppStatusType.GEN_REPLY ? '思考中...' : 'AI 回覆'}
           </button>
         </div>
       </div>
@@ -814,6 +964,7 @@ const App: React.FC = () => {
             >
               <span className={`font-medium text-text break-all leading-snug
                 ${settings.fontSize === 0 ? 'text-sm' : settings.fontSize === 1 ? 'text-base sm:text-lg' : 'text-xl'}
+                ${isAiProcessing ? 'animate-pulse opacity-70' : ''}
               `}>
                 {item.base.jp}
                 <span className="text-primary opacity-90">{item.emoji}</span>
@@ -825,14 +976,16 @@ const App: React.FC = () => {
               {settings.showSpeak && (
                 <button 
                   onClick={() => handleSpeak(item.base.jp)}
-                  className="w-12 h-full flex items-center justify-center text-sub-text hover:text-red-400 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors"
+                  disabled={isAiProcessing}
+                  className="w-12 h-full flex items-center justify-center text-sub-text hover:text-red-400 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors disabled:opacity-30"
                 >
                   <Volume2 size={20} />
                 </button>
               )}
               <button 
                 onClick={() => toggleFavorite(item.base.jp + item.emoji)}
-                className={`w-12 h-full flex items-center justify-center transition-colors hover:bg-slate-50 dark:hover:bg-zinc-800 ${
+                disabled={isAiProcessing}
+                className={`w-12 h-full flex items-center justify-center transition-colors hover:bg-slate-50 dark:hover:bg-zinc-800 disabled:opacity-30 ${
                   favorites.includes(item.base.jp + item.emoji) ? 'text-yellow-400' : 'text-sub-text hover:text-yellow-400'
                 }`}
               >
@@ -862,24 +1015,25 @@ const App: React.FC = () => {
         <div className="flex gap-2">
           <button 
             onClick={handleRegen}
-            disabled={isRegenDisabled}
+            // Regen disabled only if processing, OR if idle but no category selected (and not in custom mode)
+            disabled={isAiProcessing || (status.type === AppStatusType.IDLE && currentMain !== "自訂生成")}
             className={`
               flex-1 py-3 rounded-full text-sm font-bold flex items-center justify-center gap-2 transition-all
-              ${isRegenDisabled 
+              ${(isAiProcessing || (status.type === AppStatusType.IDLE && currentMain !== "自訂生成"))
                 ? 'bg-bg dark:bg-zinc-800 text-sub-text cursor-not-allowed' 
                 : 'bg-primary text-white hover:brightness-110 active:scale-95 shadow-md'}
             `}
           >
-            <RefreshCw size={16} className={!isRegenDisabled ? "active:rotate-180 transition-transform" : ""} />
+            <RefreshCw size={16} className={(!isAiProcessing && (status.type !== AppStatusType.IDLE || currentMain === "自訂生成")) ? "active:rotate-180 transition-transform" : ""} />
             換一批
           </button>
           
           <button 
             onClick={handleRerollEmoji}
-            disabled={results.length === 0}
+            disabled={results.length === 0 || isAiProcessing}
             className={`
               flex-1 py-3 rounded-full text-sm font-bold flex items-center justify-center gap-2 transition-all
-              ${results.length === 0 
+              ${(results.length === 0 || isAiProcessing)
                 ? 'bg-bg dark:bg-zinc-800 text-sub-text cursor-not-allowed' 
                 : 'bg-primary text-white hover:brightness-110 active:scale-95 shadow-md'}
             `}

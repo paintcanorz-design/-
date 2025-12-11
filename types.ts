@@ -88,6 +88,7 @@ export interface AppSettings {
 export interface WixAiResult {
     text: string;
     translation: string;
+    error?: string;
 }
 
 export type ModalType = 'settings' | 'history' | 'achievements' | 'tutorial' | 'welcome' | 'xp' | null;
