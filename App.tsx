@@ -545,9 +545,6 @@ const App: React.FC = () => {
          alert("⚠️ 請先輸入或貼上要回覆的內容！");
          return;
     }
-    // For retry, we assume the input is still in the box or we just use the box value
-    // The legacy code doesn't store the reply input in subKey for retry effectively unless we persist it. 
-    // We will rely on inputValue for simplicity or the 'base' of existing results if we wanted to be complex.
     const targetVal = val; 
     if(!targetVal) return;
 
@@ -569,7 +566,18 @@ const App: React.FC = () => {
     setCurrentSub("回覆生成");
 
     // 2. Send to Wix Backend
-    const phrasesToRewrite = new Array(count).fill(targetVal);
+    // Inject instructions for Reply Mode to match backend Prompt Engineering logic
+    const instructions = [
+        "(Instruction: Polite/Detailed) ",
+        "(Instruction: Emotional/Overwhelmed) ",
+        "(Instruction: Cool/Casual) "
+    ];
+    
+    const phrasesToRewrite = new Array(count).fill(targetVal).map((t, index) => {
+        const instr = instructions[index % instructions.length];
+        return `${instr}${t}`;
+    });
+
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
         phrases: phrasesToRewrite, 
