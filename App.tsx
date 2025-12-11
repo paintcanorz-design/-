@@ -105,12 +105,14 @@ const App: React.FC = () => {
   const cuteStreakRef = useRef(0);
   const themeSetRef = useRef<Set<string>>(new Set());
 
-  // Rate Limiter Refs
+  // Rate Limiter & Loop Protection Refs
   const aiCountRef = useRef(0);
   const aiStartTimeRef = useRef(0);
-  
-  // Safety Timer Ref (Watchdog)
   const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // CRITICAL: Refs to prevent infinite loops (Ping-Pong between Wix and React)
+  const isRemoteUpdate = useRef(false); 
+  const isFirstRender = useRef(true);
 
   // --- Helpers for Safety ---
   const clearAiTimeout = () => {
@@ -162,7 +164,7 @@ const App: React.FC = () => {
     };
     init();
 
-    // Load from localStorage as fallback
+    // Load from localStorage as fallback immediately
     try {
       const savedSettings = localStorage.getItem('appSettings');
       if (savedSettings) {
@@ -187,18 +189,24 @@ const App: React.FC = () => {
     } catch(e) {}
   }, []);
 
-  // 2. Wix Connection Handshake (Critical for preventing CPU spikes and ensuring connection)
+  // 2. Wix Connection Handshake
+  // We use a less aggressive interval (3s) and only start it if we haven't loaded data yet.
   useEffect(() => {
-    // Only try to connect if we haven't received data from Wix yet
     if (isDataLoaded) return;
 
-    const intervalId = setInterval(() => {
-        // Send request to Wix Parent repeatedly until we get a response (LOAD_DATA)
-        // This replaces the old 'wixConnectionInterval' logic
-        window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
-    }, 2000);
+    // Wait a bit before starting the handshake to allow Wix page to fully load
+    const startTimeout = setTimeout(() => {
+        const intervalId = setInterval(() => {
+            // Only send request if we haven't received data yet
+            if(!isDataLoaded) {
+                 window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
+            }
+        }, 3000); // 3 seconds interval
 
-    return () => clearInterval(intervalId);
+        return () => clearInterval(intervalId);
+    }, 1000);
+
+    return () => clearTimeout(startTimeout);
   }, [isDataLoaded]);
 
   // 3. Wix Message Listener
@@ -209,13 +217,18 @@ const App: React.FC = () => {
       try {
         if (!data) return;
         
+        // Handle parsing if data is string (Wix sometimes sends strings)
         if (typeof data === 'string') {
             try { data = JSON.parse(data); } catch(e) { /* ignore */ }
         }
 
         // --- Handle Load Data from Wix ---
         if (data.type === 'LOAD_DATA' && data.payload) {
-            setIsDataLoaded(true); // Mark connection as successful
+            setIsDataLoaded(true); // Stop Handshake
+            
+            // LOCK: Mark this update as remote so we don't save it back immediately
+            isRemoteUpdate.current = true;
+
             try {
                 const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
                 if(payload.appSettings) {
@@ -238,7 +251,6 @@ const App: React.FC = () => {
             clearAiTimeout(); 
 
             let rawResults = data.results;
-            
             if (typeof rawResults === 'string') {
                 try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
             }
@@ -317,7 +329,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // 4. Persist & Sync to Wix with DEBOUNCE (Fixes CPU Spike/Infinite Loop)
+  // 4. Persist & Sync to Wix with Loop Protection
   useEffect(() => {
     // Save to LocalStorage immediately
     localStorage.setItem('appSettings', JSON.stringify(settings));
@@ -326,7 +338,19 @@ const App: React.FC = () => {
     localStorage.setItem('historyLog', JSON.stringify(historyLog));
     localStorage.setItem('userAchieve', JSON.stringify(userAchieve));
     
-    // Debounce the postMessage to Wix to prevent infinite loops if Wix replies with LOAD_DATA
+    // Skip saving on the very first render to avoid sending empty/default data unnecessarily
+    if (isFirstRender.current) {
+        isFirstRender.current = false;
+        return;
+    }
+
+    // CRITICAL: Check if this update came from Wix (Remote). If so, do NOT send it back.
+    if (isRemoteUpdate.current) {
+        isRemoteUpdate.current = false; // Reset the lock for next time
+        return;
+    }
+
+    // Debounce the postMessage to Wix
     const timeoutId = setTimeout(() => {
         const backupData = { 
             appSettings: settings, 
@@ -337,7 +361,7 @@ const App: React.FC = () => {
             currentDisplayState: results 
         };
         window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
-    }, 1000); // Wait 1 second after last change before sending
+    }, 1000); 
 
     return () => clearTimeout(timeoutId);
   }, [settings, favorites, savedCategories, historyLog, userAchieve, results]);
@@ -360,12 +384,13 @@ const App: React.FC = () => {
         root.classList.remove('dark-mode');
     }
 
+    // Send BG change only if it's a real change (throttled by the nature of react state)
+    // We don't need strict loop protection here as this is a one-way visual sync usually
     const computedStyle = getComputedStyle(root);
     let bg = computedStyle.getPropertyValue('--bg').trim();
     if(bg.startsWith('var(')) {
         bg = settings.darkMode ? "#000000" : "#F2F2F7"; 
     }
-    // Also debounce background color changes slightly to be safe, or just fire
     window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
 
     themeSetRef.current.add(settings.userTheme);
