@@ -10,8 +10,7 @@ import {
   UserAchievement,
   AppSettings,
   ModalType,
-  SavedCategory,
-  WixAiResult
+  SavedCategory
 } from './types';
 import { fetchData } from './services/dataService';
 import { SettingsModal, HistoryModal, AchievementsModal, WelcomeModal, TutorialModal, LevelModal } from './Modals';
@@ -96,7 +95,7 @@ const App: React.FC = () => {
   const [activeModal, setActiveModal] = useState<ModalType>('welcome');
   const [welcomeData, setWelcomeData] = useState({ jp: "載入中...", icon: "🎁", stars: 3 });
 
-  // Session counters for achievements & Rate Limits
+  // Session counters
   const regenCountRef = useRef(0);
   const voiceCountRef = useRef(0);
   const copyTimeRef = useRef(0);
@@ -129,7 +128,7 @@ const App: React.FC = () => {
              ...item,
              base: { ...item.base, cn: item.base.cn.includes("AI") ? "連線逾時，請重試" : item.base.cn }
           })));
-      }, 30000); // 30 seconds watchdog
+      }, 30000); 
   };
 
 
@@ -142,7 +141,6 @@ const App: React.FC = () => {
       setDb(data);
       setLoading(false);
       
-      // Init Welcome Data
       const keys = Object.keys(data);
       if (keys.length > 0) {
         const m = data[keys[Math.floor(Math.random() * keys.length)]];
@@ -163,7 +161,6 @@ const App: React.FC = () => {
     };
     init();
 
-    // LocalStorage Load
     try {
       const savedSettings = localStorage.getItem('appSettings');
       if (savedSettings) {
@@ -189,13 +186,15 @@ const App: React.FC = () => {
 
     // Wix Message Listener - Critical for communication
     const handleMessage = (event: MessageEvent) => {
-      // 1. Log incoming event for debugging
-      console.log("[App] Incoming Message Event:", event.data);
-      const data = event.data;
+      let data = event.data;
 
-      // 2. Wrap in Try-Catch to prevent freezing on processing errors
       try {
         if (!data) return;
+        
+        // Wix sometimes wraps data in structure, sometimes not. Handle string parsing.
+        if (typeof data === 'string') {
+            try { data = JSON.parse(data); } catch(e) { /* ignore */ }
+        }
 
         // --- Handle Load Data from Wix ---
         if (data.type === 'LOAD_DATA' && data.payload) {
@@ -218,16 +217,16 @@ const App: React.FC = () => {
 
         // --- Handle AI Results from Wix Backend ---
         if (data.type === 'BATCH_AI_RESULT') {
-            console.log("[App] Processing AI Result Payload:", data.results);
-            clearAiTimeout(); // Success! Stop the watchdog.
+            clearAiTimeout(); 
 
             let rawResults = data.results;
-            // Robust parsing: sometimes data comes as a string depending on Wix version
+            
+            // Critical Fix: Handle if results is a JSON string OR an object
             if (typeof rawResults === 'string') {
                 try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
             }
             
-            if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
+            if(rawResults && rawResults.error === 'RATE_LIMIT') {
                 setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
                 alert("⏳ 系統忙碌中，請稍後再試");
                 return;
@@ -235,13 +234,11 @@ const App: React.FC = () => {
 
             // Validating array format
             if (!rawResults || !Array.isArray(rawResults)) {
-                // If it's an object with results inside (some wix versions do this)
                 if (rawResults && rawResults.results && Array.isArray(rawResults.results)) {
                     rawResults = rawResults.results;
                 } else {
                     console.warn("[App] AI returned invalid structure:", rawResults);
                     setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
-                    // Only alert if we actually tried to generate something
                     setResults(prev => prev.map(item => ({
                         ...item,
                         base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
@@ -251,7 +248,6 @@ const App: React.FC = () => {
             }
 
             if (rawResults.length === 0) {
-                 console.warn("[App] AI returned empty array");
                  setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
                  setResults(prev => prev.map(item => ({
                     ...item,
@@ -260,21 +256,20 @@ const App: React.FC = () => {
                  return;
             }
 
-            // Map results back to the existing placeholder items using functional update to get latest state
+            // Success: Map results back to the existing placeholder items
             setResults(prevResults => {
-                const newResults = prevResults.map((item, index) => {
+                return prevResults.map((item, index) => {
                     const aiRes = rawResults[index];
-                    if (!aiRes) return item; // Safety check if fewer results returned
+                    if (!aiRes) return item; 
                     
                     return {
                         ...item,
                         base: {
-                            jp: aiRes.text || item.base.jp, // Fallback to existing if text missing
+                            jp: aiRes.text || item.base.jp,
                             cn: aiRes.translation || item.base.cn
                         }
                     };
                 });
-                return newResults;
             });
 
             setStatus({ type: AppStatusType.IDLE, text: 'AI 生成完成' });
@@ -283,8 +278,7 @@ const App: React.FC = () => {
 
         // --- Handle AI Error ---
         if (data.type === 'BATCH_AI_ERROR') {
-            console.error("[App] Received AI Error:", data.message);
-            clearAiTimeout(); // Stop watchdog even on error
+            clearAiTimeout();
             setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
             alert(data.message || 'AI 請求失敗');
             
@@ -298,7 +292,6 @@ const App: React.FC = () => {
           console.error("[App] CRITICAL ERROR inside handleMessage:", err);
           clearAiTimeout();
           setStatus({ type: AppStatusType.IDLE, text: '程式發生錯誤' });
-          alert("⚠️ 處理資料時發生未知錯誤，已重置狀態。");
       }
     };
     
@@ -327,7 +320,6 @@ const App: React.FC = () => {
         savedSubCategories: savedCategories, 
         historyLog, 
         userAchieve,
-        // Sync current display state so user doesn't lose data on refresh if Wix supports it
         currentDisplayState: results 
     };
     window.parent.postMessage({ type: 'SAVE_DATA', payload: JSON.stringify(backupData) }, "*");
@@ -343,7 +335,6 @@ const App: React.FC = () => {
       root.classList.add(`theme-${settings.userTheme}`);
     }
 
-    // Dark Mode Logic
     if (settings.darkMode) {
         root.classList.add('dark');
         root.classList.add('dark-mode');
@@ -359,7 +350,6 @@ const App: React.FC = () => {
     }
     window.parent.postMessage({ type: 'CHANGE_BG', color: bg || (settings.darkMode ? '#000000' : '#F2F2F7') }, "*");
 
-    // Track Theme Usage
     themeSetRef.current.add(settings.userTheme);
     if(themeSetRef.current.size >= 3) unlockAchievement('color_master');
   }, [settings.userTheme, settings.darkMode]);
@@ -433,7 +423,6 @@ const App: React.FC = () => {
     const decorList = (settings.activeDecor && settings.activeDecor.length > 0) ? settings.activeDecor : DEFAULT_DECOR;
     
     if (style === EmojiStyle.CUSTOM) {
-        // Custom mix logic
         const min = settings.customMin;
         const max = settings.customMax;
         const count = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -443,7 +432,6 @@ const App: React.FC = () => {
         return " " + result;
     }
     
-    // Default Faces style
     const face = faces[Math.floor(Math.random() * faces.length)];
     const decorCount = Math.floor(Math.random() * 3) + 1;
     let decor = "";
@@ -476,7 +464,6 @@ const App: React.FC = () => {
     if (settings.totalCopies + 1 >= 50) unlockAchievement('copy_50');
     if (settings.totalCopies + 1 >= 500) unlockAchievement('copy_500');
 
-    // Combo Logic
     const now = Date.now();
     if (now - copyTimeRef.current < 10000) {
         copyComboRef.current += 1;
@@ -490,7 +477,6 @@ const App: React.FC = () => {
   };
 
   const handleSpeak = (text: string) => {
-    // Strip emojis for TTS
     const cleanText = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
     const u = new SpeechSynthesisUtterance(cleanText);
     u.lang = 'ja-JP';
@@ -550,12 +536,11 @@ const App: React.FC = () => {
   };
 
   const handleRegen = () => {
-    // Logic: if currentMain is "自訂生成", re-trigger the appropriate AI function
     if (currentMain === "自訂生成") {
         if (currentSub === "回覆生成") {
-            handleAiReply(true); // Retry Reply
+            handleAiReply(true);
         } else {
-            handleAiKeyword(true); // Retry Keyword
+            handleAiKeyword(true);
         }
         return;
     }
@@ -583,31 +568,28 @@ const App: React.FC = () => {
         alert("⚠️ 請先輸入想要生成的關鍵字！");
         return;
     }
-    // For retry, we might use currentSub as the value if it was saved there
     const targetVal = val || (isRetry && currentMain === "自訂生成" ? currentSub : ""); 
     if(!targetVal) return;
 
     if (!checkAiRateLimit()) return;
 
-    startAiTimeout(); // Start Watchdog
+    startAiTimeout(); 
     setStatus({ type: AppStatusType.GEN_KEYWORD, text: '關鍵語句生成中...' });
     
-    // 1. Generate Placeholders immediately
+    // 1. Generate Placeholders
     const count = settings.resultCount;
-    // Exactly like old code:
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
         jp: targetVal,
         cn: "AI 正在構思色色的描述..."
     }));
     
-    // Set results to placeholders so UI updates immediately
     setResults(createResultsFromPhrases(placeholders));
     
     // Set Context
     setCurrentMain("自訂生成");
     setCurrentSub(targetVal);
 
-    // 2. Send to Wix Backend
+    // 2. Send to Wix Backend (Just array of strings, like original HTML)
     const phrasesToRewrite = new Array(count).fill(targetVal);
     window.parent.postMessage({ 
         type: 'REQUEST_BATCH_AI', 
@@ -627,14 +609,14 @@ const App: React.FC = () => {
 
     if (!checkAiRateLimit()) return;
 
-    startAiTimeout(); // Start Watchdog
+    startAiTimeout();
     setStatus({ type: AppStatusType.GEN_REPLY, text: '回覆生成中...' });
 
-    // 1. Generate Placeholders - Exactly like old code "AI 繪師正在構思回覆..."
+    // 1. Generate Placeholders
     const count = settings.resultCount;
     const placeholders: Phrase[] = Array(count).fill(null).map(() => ({
-        jp: targetVal, // User input on left
-        cn: "AI 繪師正在構思回覆..." // Loading text on right
+        jp: targetVal, 
+        cn: "AI 繪師正在構思回覆..."
     }));
     
     setResults(createResultsFromPhrases(placeholders));
@@ -644,7 +626,9 @@ const App: React.FC = () => {
     setCurrentSub("回覆生成");
 
     // 2. Send to Wix Backend
-    // Inject instructions for Reply Mode EXACTLY like the original JS
+    // CRITICAL FIX: Inject instructions manually here.
+    // The backend expects instructions in the text to trigger tone logic.
+    // We match the original JS logic that might have been implicit or required by backend.
     const instructions = [
         "(Instruction: Polite/Detailed) ",
         "(Instruction: Emotional/Overwhelmed) ",
@@ -680,7 +664,7 @@ const App: React.FC = () => {
         contextSub = currentSub || "通用";
     }
     
-    startAiTimeout(); // Start Watchdog
+    startAiTimeout();
     setStatus({ type: AppStatusType.AI_REWRITING, text: `AI 改寫中...` });
     
     // Send to Wix Backend
