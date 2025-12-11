@@ -109,6 +109,30 @@ const App: React.FC = () => {
   // Rate Limiter Refs
   const aiCountRef = useRef(0);
   const aiStartTimeRef = useRef(0);
+  
+  // Safety Timer Ref (Watchdog)
+  const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // --- Helpers for Safety ---
+  const clearAiTimeout = () => {
+      if (aiTimeoutRef.current) {
+          clearTimeout(aiTimeoutRef.current);
+          aiTimeoutRef.current = null;
+      }
+  };
+
+  const startAiTimeout = () => {
+      clearAiTimeout();
+      aiTimeoutRef.current = setTimeout(() => {
+          setStatus({ type: AppStatusType.IDLE, text: '連線逾時' });
+          alert("⚠️ 連線逾時 (45s)\n後端沒有回應，請檢查網路或稍後再試。");
+          setResults(prev => prev.map(item => ({
+             ...item,
+             base: { ...item.base, cn: item.base.cn.includes("AI") ? "連線逾時，請重試" : item.base.cn }
+          })));
+      }, 45000); // 45 seconds watchdog
+  };
+
 
   // --- Effects ---
 
@@ -168,6 +192,11 @@ const App: React.FC = () => {
     const handleMessage = (event: MessageEvent) => {
       const data = event.data;
       
+      // LOGGING FOR DEBUGGING
+      if (data && (data.type === 'BATCH_AI_RESULT' || data.type === 'BATCH_AI_ERROR')) {
+          console.log("[App] Received AI Message:", data);
+      }
+
       // --- Handle Load Data from Wix ---
       if (data.type === 'LOAD_DATA' && data.payload) {
          try {
@@ -189,7 +218,13 @@ const App: React.FC = () => {
 
       // --- Handle AI Results from Wix Backend ---
       if (data.type === 'BATCH_AI_RESULT') {
-          const rawResults = data.results as WixAiResult[];
+          clearAiTimeout(); // Success! Stop the watchdog.
+
+          let rawResults = data.results;
+          // Robust parsing: sometimes data comes as a string depending on Wix version
+          if (typeof rawResults === 'string') {
+              try { rawResults = JSON.parse(rawResults); } catch(e) { console.error("JSON parse error", e); }
+          }
           
           if(rawResults && (rawResults as any).error === 'RATE_LIMIT') {
              setStatus({ type: AppStatusType.IDLE, text: '系統忙碌，請稍後' });
@@ -201,7 +236,6 @@ const App: React.FC = () => {
               setStatus({ type: AppStatusType.IDLE, text: 'AI 未返回資料' });
               alert("⚠️ AI 未返回任何結果，可能是連線問題或內容被過濾，請重試。");
               
-              // Visual feedback for failure on the cards
               setResults(prev => prev.map(item => ({
                   ...item,
                   base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
@@ -231,10 +265,10 @@ const App: React.FC = () => {
 
       // --- Handle AI Error ---
       if (data.type === 'BATCH_AI_ERROR') {
+          clearAiTimeout(); // Stop watchdog even on error
           setStatus({ type: AppStatusType.IDLE, text: data.message || 'AI 請求失敗' });
           alert(data.message || 'AI 請求失敗');
           
-          // Visual feedback for failure
           setResults(prev => prev.map(item => ({
               ...item,
               base: { ...item.base, cn: item.base.cn.includes("AI") ? "生成失敗 (請重試)" : item.base.cn }
@@ -246,7 +280,10 @@ const App: React.FC = () => {
     // Request load from parent (Wix)
     window.parent.postMessage({ type: 'REQUEST_LOAD' }, "*");
 
-    return () => window.removeEventListener('message', handleMessage);
+    return () => {
+        window.removeEventListener('message', handleMessage);
+        clearAiTimeout();
+    };
   }, []);
 
   // 2. Persist & Sync to Wix
@@ -527,6 +564,7 @@ const App: React.FC = () => {
 
     if (!checkAiRateLimit()) return;
 
+    startAiTimeout(); // Start Watchdog
     setStatus({ type: AppStatusType.GEN_KEYWORD, text: '關鍵語句生成中...' });
     
     // 1. Generate Placeholders immediately
@@ -563,6 +601,7 @@ const App: React.FC = () => {
 
     if (!checkAiRateLimit()) return;
 
+    startAiTimeout(); // Start Watchdog
     setStatus({ type: AppStatusType.GEN_REPLY, text: '回覆生成中...' });
 
     // 1. Generate Placeholders
@@ -615,6 +654,7 @@ const App: React.FC = () => {
         contextSub = currentSub || "通用";
     }
     
+    startAiTimeout(); // Start Watchdog
     setStatus({ type: AppStatusType.AI_REWRITING, text: `AI 改寫中...` });
     
     // Send to Wix Backend
